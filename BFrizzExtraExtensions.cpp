@@ -493,7 +493,7 @@ void doRefAction(const std::string& action, Ogre::vector<GameDataReference>::typ
 	}
 }
 
-bool checkWorldStateVariable(const std::string &condition, Ogre::vector<GameDataReference>::type& ref)
+bool checkWorldStateVariables(const std::string &condition, Ogre::vector<GameDataReference>::type& ref)
 {
 	for (Ogre::vector<GameDataReference>::type::iterator variableIter = ref.begin(); variableIter != ref.end(); ++variableIter)
 	{
@@ -502,20 +502,22 @@ bool checkWorldStateVariable(const std::string &condition, Ogre::vector<GameData
 
 		if (valueIter != variableIter->ptr->idata.end())
 		{
-			if(condition == "variable equals")
-				return targetVal == valueIter->second;
-			if (condition == "variable less than")
-				return targetVal < valueIter->second;
-			if (condition == "variable greater than")
-				return targetVal > valueIter->second;
+			// if condition isn't met, return false
+			if(condition == "variable equals" && !(valueIter->second == targetVal))
+				return false;
+			if (condition == "variable less than" && !(valueIter->second < targetVal))
+				return false;
+			if (condition == "variable greater than" && !(valueIter->second > targetVal))
+				return false;
 		}
 		else
 		{
 			ErrorLog("WorldStates: Variable is missing value");
 		}
 	}
-	ErrorLog("Invalid world state condition: " + condition);
-	return false;
+
+	// all checks passed
+	return true;
 }
 
 bool (*WorldEventStateQuery_isTrue_orig)(WorldEventStateQuery* thisptr);
@@ -533,15 +535,15 @@ bool WorldEventStateQuery_isTrue_hook(WorldEventStateQuery* thisptr)
 
 	// our new conditions
 	ogre_unordered_map<std::string, Ogre::vector<GameDataReference>::type>::type::iterator iter = gameData->objectReferences.find("variable equals");
-	if (iter != gameData->objectReferences.end() && !checkWorldStateVariable("variable equals", iter->second))
+	if (iter != gameData->objectReferences.end() && !checkWorldStateVariables("variable equals", iter->second))
 		return false;
 
 	iter = gameData->objectReferences.find("variable less than");
-	if (iter != gameData->objectReferences.end() && !checkWorldStateVariable("variable less than", iter->second))
+	if (iter != gameData->objectReferences.end() && !checkWorldStateVariables("variable less than", iter->second))
 		return false;
 
 	iter = gameData->objectReferences.find("variable greater than");
-	if (iter != gameData->objectReferences.end() && !checkWorldStateVariable("variable greater than", iter->second))
+	if (iter != gameData->objectReferences.end() && !checkWorldStateVariables("variable greater than", iter->second))
 		return false;
 
 	return state;
