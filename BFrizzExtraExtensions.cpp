@@ -20,6 +20,12 @@ enum itemTypeExtended
 	VARIABLE = 1000
 };
 
+
+enum TalkerEnumEx
+{
+	T_NOTIFICATION = 1000
+};
+
 // WorldEventStateQuery objects don't store a ref to their gamedata so we need this to get it in WorldEventStateQuery::isTrue
 // I'm currently not doing garbage collection on this but that should just cause a small memory leak when reloading, not enough to care about
 boost::unordered_map<WorldEventStateQuery*, GameData*> queryMap;
@@ -577,6 +583,15 @@ void changeWorldStateVariable(const std::string& action, Ogre::vector<GameDataRe
 void (*_doActions_orig)(Dialogue* thisptr, DialogLineData* dialogLine);
 void _doActions_hook(Dialogue* thisptr, DialogLineData* dialogLine)
 {
+	// Notifications
+	if (dialogLine->speaker == T_NOTIFICATION && dialogLine->lineCount >= 1)
+	{
+		std::string notification = dialogLine->texts[0];
+		for (int i = 1; i < dialogLine->lineCount; ++i)
+			notification += "\n" + dialogLine->texts[i];
+		ou->showPlayerAMessage_withLog(notification.c_str(), true);
+	}
+
 	// DIALOGUE EFFECTS
 	ogre_unordered_map<std::string, Ogre::vector<GameDataReference>::type>::type::iterator iter = dialogLine->getGameData()->objectReferences.find("take item");
 	if (iter != dialogLine->getGameData()->objectReferences.end())
@@ -645,6 +660,54 @@ void loadAllPlatoons_hook(GameWorld* thisptr)
 	}
 }
 
+Character* (*Dialogue_getSpeaker_orig)(Dialogue* thisptr, TalkerEnum who, DialogLineData* line, bool isForWordswaps);
+Character* Dialogue_getSpeaker_hook(Dialogue* thisptr, TalkerEnum who, DialogLineData* line, bool isForWordswaps)
+{
+	if (who == T_NOTIFICATION)
+		who = T_ME;
+	return Dialogue_getSpeaker_orig(thisptr, who, line, isForWordswaps);;
+}
+
+void (*DialogLineData_getText_orig)(DialogLineData* thisptr, std::string& out, bool _stampTime);
+void DialogLineData_getText_hook(DialogLineData* thisptr, std::string& out, bool _stampTime)
+{
+	boost::unordered_map<const std::string, std::string>::iterator text0 = thisptr->getGameData()->sdata.find("text0");
+	// if silent or notification - first line is empty = silent line
+	if ((text0 != thisptr->getGameData()->sdata.end() && text0->second == "")
+		|| thisptr->speaker == T_NOTIFICATION)
+		out = "[...]";
+	else
+		DialogLineData_getText_orig(thisptr, out, _stampTime);
+}
+
+bool debug = true;
+
+bool (*Dialogue_sayLine_orig)(Dialogue* thisptr, DialogLineData* line);
+bool Dialogue_sayLine_hook(Dialogue* thisptr, DialogLineData* line)
+{
+	if (line)
+	{
+		boost::unordered_map<const std::string, std::string>::iterator text0 = line->getGameData()->sdata.find("text0");
+		// first line is empty = silent line
+		bool isSilent = text0 != line->getGameData()->sdata.end() && text0->second == "";
+		
+		if (isSilent || line->speaker == T_NOTIFICATION)
+		{
+			if (isSilent && debug)
+			{
+				std::string text;
+				DialogLineData_getText_orig(line, text, false);
+				ManagementScreen::getSingleton()->addMessage("(silent) " + thisptr->getSpeaker(line->speaker, line, false)->getName(), text, MessageLogColor::ML_SYSTEM);
+			}
+			thisptr->currentLine = line;
+			thisptr->_doActions(line);
+			DialogLineData* next = thisptr->_chooseDialog(line->children, thisptr->conversationTarget.getCharacter(), false);
+			return thisptr->sayLine(next);
+		}
+	}
+	return Dialogue_sayLine_orig(thisptr, line);
+}
+
 __declspec(dllexport) void startPlugin()
 {
 	// there's no obvious way to track which GameData is associated with which WorldEventStateQuery/List so we make our own
@@ -663,4 +726,12 @@ __declspec(dllexport) void startPlugin()
 		DebugLog("WorldStates: Could not hook function!");
 	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress(&GameWorld::loadAllPlatoons), &loadAllPlatoons_hook, &loadAllPlatoons_orig))
 		DebugLog("WorldStates: Could not hook function!");
+
+	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress(&Dialogue::getSpeaker), &Dialogue_getSpeaker_hook, &Dialogue_getSpeaker_orig))
+		ErrorLog("Dialogue Extensions: could not install hook!");
+	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress(&Dialogue::sayLine), &Dialogue_sayLine_hook, &Dialogue_sayLine_orig))
+		ErrorLog("Dialogue Extensions: could not install hook!");
+	// workaround for player conversations
+	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress((void(DialogLineData::*)(std::string &, bool)) & DialogLineData::getText), &DialogLineData_getText_hook, &DialogLineData_getText_orig))
+		ErrorLog("Dialogue Extensions: could not install hook!");
 }
