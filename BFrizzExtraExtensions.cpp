@@ -15,15 +15,25 @@
 #include <boost/thread/lock_guard.hpp>
 #include <kenshi/Faction.h>
 
-enum itemTypeExtended
+enum itemTypeEx
 {
 	VARIABLE = 1000
 };
 
-
 enum TalkerEnumEx
 {
 	T_NOTIFICATION = 1000
+};
+
+enum DialogConditionEnumEx
+{
+	DC_IS_SLEEPING = 1000,
+	DC_HAS_SHORT_TERM_TAG,
+	DC_IS_ALLY_BECAUSE_OF_DISGUISE,
+	DC_STAT_LEVEL_UNMODIFIED,
+	DC_STAT_LEVEL_MODIFIED,
+	DC_WEAPON_LEVEL,
+	DC_ARMOUR_LEVEL
 };
 
 // WorldEventStateQuery objects don't store a ref to their gamedata so we need this to get it in WorldEventStateQuery::isTrue
@@ -43,17 +53,6 @@ WorldEventStateQuery* getFromData_hook(GameData* d)
 
 	return query;
 }
-
-enum ExtendedDialogConditionEnum
-{
-	DC_IS_SLEEPING = 1000,
-	DC_HAS_SHORT_TERM_TAG,
-	DC_IS_ALLY_BECAUSE_OF_DISGUISE,
-	DC_STAT_LEVEL_UNMODIFIED,
-	DC_STAT_LEVEL_MODIFIED,
-	DC_WEAPON_LEVEL,
-	DC_ARMOUR_LEVEL
-};
 
 static const float SQUAD_CHECK_RADIUS = 900.0f;
 
@@ -222,18 +221,18 @@ bool DialogLineData_checkConditions_hook(DialogLineData* thisptr, Dialogue* dial
 	return DialogLineData_checkConditions_orig(thisptr, dialog, target, isWordswap);
 }
 
-bool checkTag(ExtendedDialogConditionEnum dialogCondition, Character* conditionCheck, Character* conditionTarget, ComparisonEnum compareBy, int tag, int value)
+bool checkTag(DialogConditionEnumEx dialogCondition, Character* conditionCheck, Character* conditionTarget, ComparisonEnum compareBy, int tag, int value)
 {
-	if (dialogCondition == ExtendedDialogConditionEnum::DC_HAS_SHORT_TERM_TAG)
+	if (dialogCondition == DialogConditionEnumEx::DC_HAS_SHORT_TERM_TAG)
 	{
 		return DialogCompare(conditionCheck->getCharacterMemoryTag(conditionTarget, (CharacterPerceptionTags_ShortTerm)tag), value, compareBy);
 	}
 	// both of these can be done together
-	else if (dialogCondition == ExtendedDialogConditionEnum::DC_STAT_LEVEL_MODIFIED
-		|| dialogCondition == ExtendedDialogConditionEnum::DC_STAT_LEVEL_UNMODIFIED)
+	else if (dialogCondition == DialogConditionEnumEx::DC_STAT_LEVEL_MODIFIED
+		|| dialogCondition == DialogConditionEnumEx::DC_STAT_LEVEL_UNMODIFIED)
 	{
 		// swap between enum behaviour
-		bool unmodified = dialogCondition == ExtendedDialogConditionEnum::DC_STAT_LEVEL_UNMODIFIED;
+		bool unmodified = dialogCondition == DialogConditionEnumEx::DC_STAT_LEVEL_UNMODIFIED;
 
 		float stat = conditionCheck->getStats()->getStat((StatsEnumerated)tag, unmodified);
 		return DialogCompare((int)stat, value, compareBy);
@@ -250,21 +249,21 @@ bool checkTags_hook(DialogLineData* thisptr, Character* me, Character* target)
 	for (int i = 0; i < thisptr->conditions.size(); ++i)
 	{
 		// optimization - only do a full check if there's an actual extended condition
-		if (thisptr->conditions[i]->key == ExtendedDialogConditionEnum::DC_HAS_SHORT_TERM_TAG
+		if (thisptr->conditions[i]->key == DialogConditionEnumEx::DC_HAS_SHORT_TERM_TAG
 			|| thisptr->conditions[i]->key == DC_STAT_LEVEL_UNMODIFIED
 			|| thisptr->conditions[i]->key == DC_STAT_LEVEL_MODIFIED)
 		{
-			ogre_unordered_map<std::string, Ogre::vector<GameDataReference>::type>::type::iterator iter = thisptr->data->objectReferences.find("conditions");
-
-			if (iter != thisptr->data->objectReferences.end())
+			const Ogre::vector<GameDataReference>::type* list = thisptr->data->getReferenceListIfExists("conditions");
+			if (list)
 			{
-				for (int i = 0; i < iter->second.size(); ++i)
+				for (int i = 0; i < list->size(); ++i)
 				{
-					ExtendedDialogConditionEnum dialogCondition = (ExtendedDialogConditionEnum)iter->second[i].ptr->idata.find("condition name")->second;
-					ComparisonEnum compareBy = (ComparisonEnum)iter->second[i].ptr->idata.find("compare by")->second;
-					TalkerEnum who = (TalkerEnum)iter->second[i].ptr->idata.find("who")->second;
-					int tag = iter->second[i].ptr->idata.find("tag")->second;
-					int value = iter->second[i].values[0];
+					GameData* gameData = (*list)[i].ptr;
+					DialogConditionEnumEx dialogCondition = (DialogConditionEnumEx)gameData->idata.find("condition name")->second;
+					ComparisonEnum compareBy = (ComparisonEnum)gameData->idata.find("compare by")->second;
+					TalkerEnum who = (TalkerEnum)gameData->idata.find("who")->second;
+					int tag = gameData->idata.find("tag")->second;
+					int value = (*list)[i].values[0];
 
 					// T_ME behaviour - do I have tag for target
 					Character* conditionCheck = me;
@@ -420,16 +419,20 @@ int destroyItems(Character* target, GameData* itemData, int count)
 	return count;
 }
 
-void doRefAction(const std::string& action, Ogre::vector<GameDataReference>::type& ref, Dialogue* thisptr)
+void doRefAction(const std::string& action, DialogLineData* line, Dialogue* thisptr)
 {
-	if (ref.size() == 0)
+	const Ogre::vector<GameDataReference>::type* ref = line->getGameData()->getReferenceListIfExists(action);
+	if (ref == nullptr)
+		return;
+
+	if (ref->size() == 0)
 	{
 		ErrorLog("Missing references for \"" + action + "\"");
 	}
 
 	if (action == "take item" || action == "take item from squad")
 	{
-		for (Ogre::vector<GameDataReference>::type::iterator itemIter = ref.begin(); itemIter != ref.end(); ++itemIter)
+		for (Ogre::vector<GameDataReference>::type::const_iterator itemIter = ref->begin(); itemIter != ref->end(); ++itemIter)
 		{
 			Character* giver = thisptr->getConversationTarget().getCharacter();
 			Character* taker = thisptr->me;
@@ -465,7 +468,7 @@ void doRefAction(const std::string& action, Ogre::vector<GameDataReference>::typ
 	else if (action == "destroy item" || action == "destroy item from squad")
 	{
 
-		for (Ogre::vector<GameDataReference>::type::iterator itemIter = ref.begin(); itemIter != ref.end(); ++itemIter)
+		for (Ogre::vector<GameDataReference>::type::const_iterator itemIter = ref->begin(); itemIter != ref->end(); ++itemIter)
 		{
 			Character* target = thisptr->getConversationTarget().getCharacter();
 			if (target != nullptr)
@@ -555,14 +558,18 @@ bool WorldEventStateQuery_isTrue_hook(WorldEventStateQuery* thisptr)
 	return state;
 }
 
-void changeWorldStateVariable(const std::string& action, Ogre::vector<GameDataReference>::type& ref)
+void changeWorldStateVariable(const std::string& action, DialogLineData* line)
 {
-	if (ref.size() == 0)
+	const Ogre::vector<GameDataReference>::type* ref = line->getGameData()->getReferenceListIfExists(action);
+	if (ref == nullptr)
+		return;
+
+	if (ref->size() == 0)
 	{
 		ErrorLog("Missing references for \"" + action + "\"");
 	}
 
-	for (Ogre::vector<GameDataReference>::type::iterator variableIter = ref.begin(); variableIter != ref.end(); ++variableIter)
+	for (Ogre::vector<GameDataReference>::type::const_iterator variableIter = ref->begin(); variableIter != ref->end(); ++variableIter)
 	{
 		ogre_unordered_map<std::string, int>::type::iterator valueIter = variableIter->ptr->idata.find("value");
 
@@ -593,30 +600,15 @@ void _doActions_hook(Dialogue* thisptr, DialogLineData* dialogLine)
 	}
 
 	// DIALOGUE EFFECTS
-	ogre_unordered_map<std::string, Ogre::vector<GameDataReference>::type>::type::iterator iter = dialogLine->getGameData()->objectReferences.find("take item");
-	if (iter != dialogLine->getGameData()->objectReferences.end())
-		doRefAction("take item", iter->second, thisptr);
-
-	iter = dialogLine->getGameData()->objectReferences.find("take item from squad");
-	if (iter != dialogLine->getGameData()->objectReferences.end())
-		doRefAction("take item from squad", iter->second, thisptr);
-
-	iter = dialogLine->getGameData()->objectReferences.find("destroy item");
-	if (iter != dialogLine->getGameData()->objectReferences.end())
-		doRefAction("destroy item", iter->second, thisptr);
-
-	iter = dialogLine->getGameData()->objectReferences.find("destroy item from squad");
-	if (iter != dialogLine->getGameData()->objectReferences.end())
-		doRefAction("destroy item from squad", iter->second, thisptr);
+	doRefAction("take item", dialogLine, thisptr);
+	doRefAction("take item from squad", dialogLine, thisptr);
+	doRefAction("destroy item", dialogLine, thisptr);
+	doRefAction("destroy item from squad", dialogLine, thisptr);
 
 	// VARIABLE EFFECTS
-	iter = dialogLine->getGameData()->objectReferences.find("set variable");
-	if (iter != dialogLine->getGameData()->objectReferences.end())
-		changeWorldStateVariable("set variable", iter->second);
+	changeWorldStateVariable("set variable", dialogLine);
+	changeWorldStateVariable("add to variable", dialogLine);
 
-	iter = dialogLine->getGameData()->objectReferences.find("add to variable");
-	if (iter != dialogLine->getGameData()->objectReferences.end())
-		changeWorldStateVariable("add to variable", iter->second);
 
 	// continue
 	_doActions_orig(thisptr, dialogLine);
