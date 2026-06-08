@@ -14,6 +14,7 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/lock_guard.hpp>
 #include <kenshi/Faction.h>
+#include <kenshi/gui/ManagementScreen.h>
 
 enum itemTypeEx
 {
@@ -358,34 +359,117 @@ bool checkTags_hook(DialogLineData* thisptr, Character* me, Character* target)
 	return checkTags_orig(thisptr, me, target);
 }
 
+const GameDataReference* FindInList(GameData* target, const Ogre::vector<GameDataReference>::type* list)
+{
+	for (int i = 0; i < list->size(); ++i)
+	{
+		DebugLog(target->name + " " + (*list)[i].ptr->name);
+		if ((*list)[i].ptr == target)
+			return &(*list)[i];
+	}
+	return nullptr;
+}
+
 // returns num items taken
-int takeItems(Character* giver, Character* taker, GameData* itemData, int count)
+int takeItems(Character* giver, Character* taker, GameData* itemData, int count, const Ogre::vector<GameDataReference>::type* armourFactions
+	, const Ogre::vector<GameDataReference>::type* swordManufacturer, const Ogre::vector<GameDataReference>::type* swordModel)
 {
 	int countTaken = 0;
-	while (countTaken < count)
+
+	while (true)
 	{
-		Item* item = giver->inventory->getItem(itemData);
-
-		// stop when the character no longer has instances of the item
-		if (item == nullptr)
-			return countTaken;
-
-		const int countRemaining = count - countTaken;
-		// if stack has more items than we're removing, split and return
-		if (item->quantity > countRemaining)
+		std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems;
+		sectionItems.emplace_back(std::make_pair(giver->inventory, lektor<Item*>()));
+		for (ogre_unordered_map<std::string, InventorySection*>::type::iterator iter = giver->inventory->sections.begin();
+			iter != giver->inventory->sections.end(); ++iter)
 		{
-			// part of stack is moved, split by creating new instance
-			item->quantity -= countRemaining;
-			Item* newItem = ou->theFactory->copyItem(item);
-			newItem->quantity = countRemaining;
-			taker->giveItem(newItem, true, false);
-			return count;
+			iter->second->getAllItemsOfType(sectionItems[0].second, itemData->type);
+			// also search backpacks in any inventory section
+			lektor<Item*> containers;
+			iter->second->getAllItemsOfType(containers, itemType::CONTAINER);
+			for (int i = 0; i < containers.size(); ++i)
+			{
+				sectionItems.emplace_back(std::make_pair(containers[i]->getInventory(), lektor<Item*>()));
+				containers[i]->getInventory()->getAllItemsOfType(sectionItems.back().second, itemData->type, false);
+			}
+			free(containers.stuff);
 		}
 
-		// whole stack is moved
-		countTaken += item->quantity;
 
-		giver->dropItem(item);
+		Item* item = nullptr;
+		Inventory* inventory = nullptr;
+		DebugLog("Searching for " + itemData->name);
+		// find matching item
+		for (int j = 0; j < sectionItems.size(); ++j)
+		{
+			if (!item)
+			{
+				inventory = sectionItems[j].first;
+				lektor<Item*>& items = sectionItems[j].second;
+				for (int i = 0; i < items.size(); ++i)
+				{
+					DebugLog(items[i]->displayName);
+					if (items[i]->getGameData() == itemData)
+					{
+						if (itemData->type == itemType::WEAPON)
+						{
+							// Extra weapon checks
+							if ((swordManufacturer == nullptr || FindInList(items[i]->manufacturerData, swordManufacturer))
+								&& (swordModel == nullptr || FindInList(items[i]->materialData, swordModel)))
+							{
+								item = items[i];
+								break;
+							}
+						}
+						else if (itemData->type == itemType::ARMOUR)
+						{
+							// Extra armour checks
+							if (armourFactions == nullptr || (items[i]->isAFactionUniform() != nullptr && FindInList(items[i]->isAFactionUniform()->data, armourFactions)))
+							{
+								item = items[i];
+								break;
+							}
+						}
+						else
+						{
+							// default case
+							item = items[i];
+							break;
+						}
+					}
+				}
+			}
+			// manual free
+			free(sectionItems[j].second.stuff);
+
+			// stop when the character no longer has instances of the item
+			if (item == nullptr)
+				return countTaken;
+
+			const int countRemaining = count - countTaken;
+			// if stack has more items than we're removing, split and return
+			if (item->quantity > countRemaining)
+			{
+				// part of stack is moved, split by creating new instance
+				item->quantity -= countRemaining;
+				Item* newItem = ou->theFactory->copyItem(item);
+				newItem->quantity = countRemaining;
+				taker->giveItem(newItem, true, false);
+				return count;
+			}
+
+			// whole stack is moved
+			countTaken += item->quantity;
+
+		// whole stack is moved
+		item = inventory->removeItemDontDestroy_returnsItem(item, item->quantity, true);
+		if (item == nullptr)
+		{
+			ErrorLog("Error taking item, removeItemDontDestroy_returnsItem returned false");
+			return countTaken;
+		}
+		countTaken += item->quantity;
+		
 		taker->giveItem(item, true, false);
 	}
 
@@ -394,11 +478,75 @@ int takeItems(Character* giver, Character* taker, GameData* itemData, int count)
 }
 
 // returns num items destroyed
-int destroyItems(Character* target, GameData* itemData, int count)
+int destroyItems(Character* target, GameData* itemData, int count, const Ogre::vector<GameDataReference>::type* armourFactions
+	, const Ogre::vector<GameDataReference>::type* swordManufacturer, const Ogre::vector<GameDataReference>::type* swordModel)
 {
 	while (true)
 	{
-		Item* item = target->inventory->getItem(itemData);
+		std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems;
+		sectionItems.emplace_back(std::make_pair(target->inventory, lektor<Item*>()));
+		for (ogre_unordered_map<std::string, InventorySection*>::type::iterator iter = target->inventory->sections.begin();
+			iter != target->inventory->sections.end(); ++iter)
+		{
+			DebugLog(iter->first);
+			iter->second->getAllItemsOfType(sectionItems[0].second, itemData->type);
+			// also search backpacks in any inventory section
+			lektor<Item*> containers;
+			iter->second->getAllItemsOfType(containers, itemType::CONTAINER);
+			for (int i = 0; i < containers.size(); ++i)
+			{
+				sectionItems.emplace_back(std::make_pair(containers[i]->getInventory(), lektor<Item*>()));
+				containers[i]->getInventory()->getAllItemsOfType(sectionItems.back().second, itemData->type, false);
+			}
+			free(containers.stuff);
+		}
+
+		Item* item = nullptr;
+		Inventory* inventory = nullptr;
+		DebugLog("Searching for " + itemData->name);
+		// find matching item
+		for (int j = 0; j < sectionItems.size(); ++j)
+		{
+			if(!item)
+			{
+				inventory = sectionItems[j].first;
+				lektor<Item*>& items = sectionItems[j].second;
+				for (int i = 0; i < items.size(); ++i)
+				{
+					DebugLog(items[i]->displayName);
+					if (items[i]->getGameData() == itemData)
+					{
+						if (itemData->type == itemType::WEAPON)
+						{
+							// Extra weapon checks
+							if ((swordManufacturer == nullptr || FindInList(items[i]->manufacturerData, swordManufacturer))
+								&& (swordModel == nullptr || FindInList(items[i]->materialData, swordModel)))
+							{
+								item = items[i];
+								break;
+							}
+						}
+						else if (itemData->type == itemType::ARMOUR)
+						{
+							// Extra armour checks
+							if (armourFactions == nullptr || (items[i]->isAFactionUniform() != nullptr && FindInList(items[i]->isAFactionUniform()->data, armourFactions)))
+							{
+								item = items[i];
+								break;
+							}
+						}
+						else
+						{
+							// default case
+							item = items[i];
+							break;
+						}
+					}
+				}
+			}
+			// manual free
+			free(sectionItems[j].second.stuff);
+		}
 
 		// stop when the character no longer has instances of the item
 		if (item == nullptr)
@@ -412,9 +560,8 @@ int destroyItems(Character* target, GameData* itemData, int count)
 
 		count -= item->quantity;
 
-		// get rid of inventory references or something, no idea if this is needed but it seems like a good idea
-		target->dropItem(item);
-		ou->destroy(item, false, "Destroy item event");
+		if (!inventory->removeItemAutoDestroy(item, item->quantity))
+			DebugLog("removeItem returned false");
 	}
 	return count;
 }
@@ -432,6 +579,11 @@ void doRefAction(const std::string& action, DialogLineData* line, Dialogue* this
 
 	if (action == "take item" || action == "take item from squad")
 	{
+		// find restrictions
+		const Ogre::vector<GameDataReference>::type* armourFactions = line->getGameData()->getReferenceListIfExists("armour faction");
+		const Ogre::vector<GameDataReference>::type* swordManufacturer = line->getGameData()->getReferenceListIfExists("sword manufacturer");
+		const Ogre::vector<GameDataReference>::type* swordModel = line->getGameData()->getReferenceListIfExists("sword model");
+
 		for (Ogre::vector<GameDataReference>::type::const_iterator itemIter = ref->begin(); itemIter != ref->end(); ++itemIter)
 		{
 			Character* giver = thisptr->getConversationTarget().getCharacter();
@@ -440,7 +592,7 @@ void doRefAction(const std::string& action, DialogLineData* line, Dialogue* this
 			{
 				if (action == "take item")
 				{
-					takeItems(giver, taker, itemIter->ptr, itemIter->values[0]);
+					takeItems(giver, taker, itemIter->ptr, itemIter->values[0], armourFactions, swordManufacturer, swordModel);
 				}
 				else
 				{
@@ -454,7 +606,7 @@ void doRefAction(const std::string& action, DialogLineData* line, Dialogue* this
 					{
 						Character* squadChar = dynamic_cast<Character*>(characters[c]);
 						if (squadChar)
-							itemsLeft -= takeItems(giver, taker, itemIter->ptr, itemsLeft);
+							itemsLeft -= takeItems(giver, taker, itemIter->ptr, itemsLeft, armourFactions, swordManufacturer, swordModel);
 						if (itemsLeft == 0)
 							break;
 					}
@@ -467,6 +619,10 @@ void doRefAction(const std::string& action, DialogLineData* line, Dialogue* this
 	}
 	else if (action == "destroy item" || action == "destroy item from squad")
 	{
+		// find restrictions
+		const Ogre::vector<GameDataReference>::type* armourFactions = line->getGameData()->getReferenceListIfExists("armour faction");
+		const Ogre::vector<GameDataReference>::type* swordManufacturer = line->getGameData()->getReferenceListIfExists("sword manufacturer");
+		const Ogre::vector<GameDataReference>::type* swordModel = line->getGameData()->getReferenceListIfExists("sword model");
 
 		for (Ogre::vector<GameDataReference>::type::const_iterator itemIter = ref->begin(); itemIter != ref->end(); ++itemIter)
 		{
@@ -475,7 +631,7 @@ void doRefAction(const std::string& action, DialogLineData* line, Dialogue* this
 			{
 				if (action == "destroy item")
 				{
-					destroyItems(target, itemIter->ptr, itemIter->values[0]);
+					destroyItems(target, itemIter->ptr, itemIter->values[0], armourFactions, swordManufacturer, swordModel);
 				}
 				else
 				{
@@ -489,7 +645,7 @@ void doRefAction(const std::string& action, DialogLineData* line, Dialogue* this
 					{
 						Character* squadChar = dynamic_cast<Character*>(characters[c]);
 						if (squadChar)
-							itemsLeft -= destroyItems(target, itemIter->ptr, itemsLeft);
+							itemsLeft -= destroyItems(target, itemIter->ptr, itemsLeft, armourFactions, swordManufacturer, swordModel);
 						if (itemsLeft == 0)
 							break;
 					}
@@ -587,6 +743,57 @@ void changeWorldStateVariable(const std::string& action, DialogLineData* line)
 	}
 }
 
+// info needed for constructing a weapon
+class PackagedItem
+{
+public:
+	virtual ~PackagedItem() {};
+	GameData* item;
+	GameData* dialogLine;
+	int levelOverride;
+	PackagedItem()
+		: item(nullptr)
+		, dialogLine(nullptr)
+		, levelOverride(0)
+	{
+
+	};
+	GameData* getItem()
+	{
+		// order of weapon args is weird
+		// createItem(manufacturer,handle,item,model,level,flag)
+		if (item->type == itemType::WEAPON)
+		{
+			if (dialogLine->getReferenceListIfExists("sword manufacturer"))
+				return ou->theFactory->chooseDataFromListWithVals(dialogLine, "sword manufacturer", itemType::WEAPON_MANUFACTURER, 0)->ptr;
+			// default to unknown manufacturer
+			return ou->gamedata.getDataByName("Unknown", itemType::WEAPON_MANUFACTURER);
+		}
+		else
+		{
+			return item;
+		}
+	}
+	GameData* getMesh()
+	{
+		if (item->type == itemType::WEAPON)
+			return item;
+		return nullptr;
+	}
+	GameData* getMatData()
+	{
+		if (item->type == itemType::WEAPON && dialogLine->getReferenceListIfExists("sword model"))
+			return ou->theFactory->chooseDataFromListWithVals(dialogLine, "sword model", itemType::MATERIAL_SPECS_WEAPON, 0)->ptr;
+		return nullptr;
+	}
+	Faction* getFaction()
+	{
+		if (item->type == itemType::ARMOUR && dialogLine->getReferenceListIfExists("armour faction"))
+			return ou->factionMgr->getOrCreateFaction(ou->theFactory->chooseDataFromListWithVals(dialogLine, "armour faction", itemType::FACTION, 0)->ptr);
+		return nullptr;
+	}
+};
+
 void (*_doActions_orig)(Dialogue* thisptr, DialogLineData* dialogLine);
 void _doActions_hook(Dialogue* thisptr, DialogLineData* dialogLine)
 {
@@ -609,9 +816,74 @@ void _doActions_hook(Dialogue* thisptr, DialogLineData* dialogLine)
 	changeWorldStateVariable("set variable", dialogLine);
 	changeWorldStateVariable("add to variable", dialogLine);
 
+	// prepare item creation
+	for (int i = 0; i < dialogLine->givesItem.size(); ++i)
+	{
+		if (strcmp(typeid(*dialogLine->givesItem[i].data).name(), "class GameData") == 0)
+		{
+			// generic item stuff
+			//DebugLog("item: " + dialogLine->givesItem[i].data->name);
+			PackagedItem* item = new PackagedItem();
+			item->item = dialogLine->givesItem[i].data;
+			item->dialogLine = dialogLine->getGameData();
+			const Ogre::vector<GameDataReference>::type* giveItemList = dialogLine->getGameData()->getReferenceListIfExists("give item");
+			if (giveItemList && giveItemList->size() >= i)
+				item->levelOverride = giveItemList->at(i).values[1];
+			
+			// specific item stuff
+			/*
+			if (dialogLine->givesItem[i].data->type == itemType::WEAPON)
+			{
+				//item->mesh = item->item;
+				//item->item = nullptr;
+				//if(dialogLine->getGameData()->getReferenceListIfExists("sword manufacturer"))
+				//	item->item = ou->theFactory->chooseDataFromListWithVals(dialogLine->getGameData(), "sword manufacturer", itemType::WEAPON_MANUFACTURER, 0)->ptr;
+				//const Ogre::vector<GameDataReference>::type* list = dialogLine->getGameData()->getReferenceListIfExists("sword manufacturer");
+				//if (list)
+				//	item->item = ou->theFactory->chooseDataFromListWithVals(dialogLine->getGameData(), "sword manufacturer", itemType::WEAPON_MANUFACTURER, 0);// list.at(0).ptr;
+				//else
+				// default to unknown manufacturer
+				//if(!item->item)
+				//	item->item = ou->gamedata.getDataByName("Unknown", itemType::WEAPON_MANUFACTURER);
+				//iter = dialogLine->getGameData()->objectReferences.find("sword model");
+				//if (iter != dialogLine->getGameData()->objectReferences.end())
+				//	item->model = iter->second.at(0).ptr;
+			}
+			else if (dialogLine->givesItem[i].data->type == itemType::ARMOUR)
+			{
+				//iter = dialogLine->getGameData()->objectReferences.find("armour faction");
+				//if (iter != dialogLine->getGameData()->objectReferences.end())
+				//	item->faction = ou->factionMgr->getOrCreateFaction(iter->second.at(0).ptr);
+			}
+			*/
+			dialogLine->givesItem[i].data = (GameData*)item;
+		}
+	}
 
 	// continue
 	_doActions_orig(thisptr, dialogLine);
+}
+
+Item* (*RootObjectFactory_createItem_orig)(RootObjectFactory* thisptr, GameData* gd, const hand& handle, GameData* weaponMesh, GameData* matData, int levelOverride, Faction* flagUniform);
+Item* RootObjectFactory_createItem_hook(RootObjectFactory* thisptr, GameData* gd, const hand& handle, GameData* weaponMesh, GameData* matData, int levelOverride, Faction* flagUniform)
+{
+	// Workaround for types not being detected properly in "undefined behaviour" typecasts
+	// dynamic_cast doesn't detect class properly, but RTTI still works, so we implement our own equivalent
+	if (strcmp(typeid(*gd).name(), "class PackagedItem") == 0)
+	{
+		PackagedItem* item = (PackagedItem*)gd;
+		gd = item->getItem();
+		if (item->levelOverride != 0)
+			levelOverride = std::max(0, item->levelOverride);
+		if (item->item->type == itemType::WEAPON)
+		{
+			weaponMesh = item->getMesh();
+			matData = item->getMatData();
+		}
+		if (item->item->type == itemType::ARMOUR)
+			flagUniform = item->getFaction();
+	}
+	return RootObjectFactory_createItem_orig(thisptr, gd, handle, weaponMesh, matData, levelOverride, flagUniform);
 }
 
 // this is a convenient place to hook into the save system
@@ -722,6 +994,8 @@ __declspec(dllexport) void startPlugin()
 	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress(&Dialogue::getSpeaker), &Dialogue_getSpeaker_hook, &Dialogue_getSpeaker_orig))
 		ErrorLog("Dialogue Extensions: could not install hook!");
 	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress(&Dialogue::sayLine), &Dialogue_sayLine_hook, &Dialogue_sayLine_orig))
+		ErrorLog("Dialogue Extensions: could not install hook!");
+	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress((Item*(RootObjectFactory::*)(GameData*, const hand&, GameData*, GameData*, int, Faction*)) & RootObjectFactory::createItem), &RootObjectFactory_createItem_hook, &RootObjectFactory_createItem_orig))
 		ErrorLog("Dialogue Extensions: could not install hook!");
 	// workaround for player conversations
 	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress((void(DialogLineData::*)(std::string &, bool)) & DialogLineData::getText), &DialogLineData_getText_hook, &DialogLineData_getText_orig))
