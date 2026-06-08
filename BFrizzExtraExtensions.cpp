@@ -363,11 +363,86 @@ const GameDataReference* FindInList(GameData* target, const Ogre::vector<GameDat
 {
 	for (int i = 0; i < list->size(); ++i)
 	{
-		DebugLog(target->name + " " + (*list)[i].ptr->name);
 		if ((*list)[i].ptr == target)
 			return &(*list)[i];
 	}
 	return nullptr;
+}
+
+std::vector<std::pair<Inventory*, lektor<Item*>>> GetItemsOfTypeFromSections(Character* character, itemType type)
+{
+	std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems;
+	sectionItems.emplace_back(std::make_pair(character->inventory, lektor<Item*>()));
+	for (ogre_unordered_map<std::string, InventorySection*>::type::iterator iter = character->inventory->sections.begin();
+		iter != character->inventory->sections.end(); ++iter)
+	{
+		iter->second->getAllItemsOfType(sectionItems[0].second, type);
+		// also search backpacks in any inventory section
+		lektor<Item*> containers;
+		iter->second->getAllItemsOfType(containers, itemType::CONTAINER);
+		for (int i = 0; i < containers.size(); ++i)
+		{
+			sectionItems.emplace_back(std::make_pair(containers[i]->getInventory(), lektor<Item*>()));
+			containers[i]->getInventory()->getAllItemsOfType(sectionItems.back().second, type, false);
+		}
+		free(containers.stuff);
+	}
+
+	return sectionItems;
+}
+
+// searches all sections + backpacks
+Item* FindItemInCharacterInventories(Character* character, GameData* itemData, const Ogre::vector<GameDataReference>::type* armourFactions
+	, const Ogre::vector<GameDataReference>::type* swordManufacturer, const Ogre::vector<GameDataReference>::type* swordModel, Inventory* &inventory)
+{
+	std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems = GetItemsOfTypeFromSections(character, itemData->type);
+
+	Item* item = nullptr;
+	inventory = nullptr;
+	// find matching item
+	for (int j = 0; j < sectionItems.size(); ++j)
+	{
+		if (!item)
+		{
+			inventory = sectionItems[j].first;
+			lektor<Item*>& items = sectionItems[j].second;
+			for (int i = 0; i < items.size(); ++i)
+			{
+				if (items[i]->getGameData() == itemData)
+				{
+					if (itemData->type == itemType::WEAPON)
+					{
+						// Extra weapon checks
+						if ((swordManufacturer == nullptr || FindInList(items[i]->manufacturerData, swordManufacturer))
+							&& (swordModel == nullptr || FindInList(items[i]->materialData, swordModel)))
+						{
+							item = items[i];
+							break;
+						}
+					}
+					else if (itemData->type == itemType::ARMOUR)
+					{
+						// Extra armour checks
+						if (armourFactions == nullptr || (items[i]->isAFactionUniform() != nullptr && FindInList(items[i]->isAFactionUniform()->data, armourFactions)))
+						{
+							item = items[i];
+							break;
+						}
+					}
+					else
+					{
+						// default case
+						item = items[i];
+						break;
+					}
+				}
+			}
+		}
+		// manual free
+		free(sectionItems[j].second.stuff);
+	}
+
+	return item;
 }
 
 // returns num items taken
@@ -378,88 +453,26 @@ int takeItems(Character* giver, Character* taker, GameData* itemData, int count,
 
 	while (true)
 	{
-		std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems;
-		sectionItems.emplace_back(std::make_pair(giver->inventory, lektor<Item*>()));
-		for (ogre_unordered_map<std::string, InventorySection*>::type::iterator iter = giver->inventory->sections.begin();
-			iter != giver->inventory->sections.end(); ++iter)
+		Inventory* inventory;
+		Item* item = FindItemInCharacterInventories(giver, itemData, armourFactions, swordManufacturer, swordModel, inventory);
+
+		// stop when the character no longer has instances of the item
+		if (item == nullptr)
+			return countTaken;
+
+		// TODO can we use inventory->removeItemDontDestroy_returnsItem ? 
+
+		const int countRemaining = count - countTaken;
+		// if stack has more items than we're removing, split and return
+		if (item->quantity > countRemaining)
 		{
-			iter->second->getAllItemsOfType(sectionItems[0].second, itemData->type);
-			// also search backpacks in any inventory section
-			lektor<Item*> containers;
-			iter->second->getAllItemsOfType(containers, itemType::CONTAINER);
-			for (int i = 0; i < containers.size(); ++i)
-			{
-				sectionItems.emplace_back(std::make_pair(containers[i]->getInventory(), lektor<Item*>()));
-				containers[i]->getInventory()->getAllItemsOfType(sectionItems.back().second, itemData->type, false);
-			}
-			free(containers.stuff);
+			// part of stack is moved, split by creating new instance
+			item->quantity -= countRemaining;
+			Item* newItem = ou->theFactory->copyItem(item);
+			newItem->quantity = countRemaining;
+			taker->giveItem(newItem, true, false);
+			return count;
 		}
-
-
-		Item* item = nullptr;
-		Inventory* inventory = nullptr;
-		DebugLog("Searching for " + itemData->name);
-		// find matching item
-		for (int j = 0; j < sectionItems.size(); ++j)
-		{
-			if (!item)
-			{
-				inventory = sectionItems[j].first;
-				lektor<Item*>& items = sectionItems[j].second;
-				for (int i = 0; i < items.size(); ++i)
-				{
-					DebugLog(items[i]->displayName);
-					if (items[i]->getGameData() == itemData)
-					{
-						if (itemData->type == itemType::WEAPON)
-						{
-							// Extra weapon checks
-							if ((swordManufacturer == nullptr || FindInList(items[i]->manufacturerData, swordManufacturer))
-								&& (swordModel == nullptr || FindInList(items[i]->materialData, swordModel)))
-							{
-								item = items[i];
-								break;
-							}
-						}
-						else if (itemData->type == itemType::ARMOUR)
-						{
-							// Extra armour checks
-							if (armourFactions == nullptr || (items[i]->isAFactionUniform() != nullptr && FindInList(items[i]->isAFactionUniform()->data, armourFactions)))
-							{
-								item = items[i];
-								break;
-							}
-						}
-						else
-						{
-							// default case
-							item = items[i];
-							break;
-						}
-					}
-				}
-			}
-			// manual free
-			free(sectionItems[j].second.stuff);
-
-			// stop when the character no longer has instances of the item
-			if (item == nullptr)
-				return countTaken;
-
-			const int countRemaining = count - countTaken;
-			// if stack has more items than we're removing, split and return
-			if (item->quantity > countRemaining)
-			{
-				// part of stack is moved, split by creating new instance
-				item->quantity -= countRemaining;
-				Item* newItem = ou->theFactory->copyItem(item);
-				newItem->quantity = countRemaining;
-				taker->giveItem(newItem, true, false);
-				return count;
-			}
-
-			// whole stack is moved
-			countTaken += item->quantity;
 
 		// whole stack is moved
 		item = inventory->removeItemDontDestroy_returnsItem(item, item->quantity, true);
@@ -483,70 +496,9 @@ int destroyItems(Character* target, GameData* itemData, int count, const Ogre::v
 {
 	while (true)
 	{
-		std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems;
-		sectionItems.emplace_back(std::make_pair(target->inventory, lektor<Item*>()));
-		for (ogre_unordered_map<std::string, InventorySection*>::type::iterator iter = target->inventory->sections.begin();
-			iter != target->inventory->sections.end(); ++iter)
-		{
-			DebugLog(iter->first);
-			iter->second->getAllItemsOfType(sectionItems[0].second, itemData->type);
-			// also search backpacks in any inventory section
-			lektor<Item*> containers;
-			iter->second->getAllItemsOfType(containers, itemType::CONTAINER);
-			for (int i = 0; i < containers.size(); ++i)
-			{
-				sectionItems.emplace_back(std::make_pair(containers[i]->getInventory(), lektor<Item*>()));
-				containers[i]->getInventory()->getAllItemsOfType(sectionItems.back().second, itemData->type, false);
-			}
-			free(containers.stuff);
-		}
 
-		Item* item = nullptr;
-		Inventory* inventory = nullptr;
-		DebugLog("Searching for " + itemData->name);
-		// find matching item
-		for (int j = 0; j < sectionItems.size(); ++j)
-		{
-			if(!item)
-			{
-				inventory = sectionItems[j].first;
-				lektor<Item*>& items = sectionItems[j].second;
-				for (int i = 0; i < items.size(); ++i)
-				{
-					DebugLog(items[i]->displayName);
-					if (items[i]->getGameData() == itemData)
-					{
-						if (itemData->type == itemType::WEAPON)
-						{
-							// Extra weapon checks
-							if ((swordManufacturer == nullptr || FindInList(items[i]->manufacturerData, swordManufacturer))
-								&& (swordModel == nullptr || FindInList(items[i]->materialData, swordModel)))
-							{
-								item = items[i];
-								break;
-							}
-						}
-						else if (itemData->type == itemType::ARMOUR)
-						{
-							// Extra armour checks
-							if (armourFactions == nullptr || (items[i]->isAFactionUniform() != nullptr && FindInList(items[i]->isAFactionUniform()->data, armourFactions)))
-							{
-								item = items[i];
-								break;
-							}
-						}
-						else
-						{
-							// default case
-							item = items[i];
-							break;
-						}
-					}
-				}
-			}
-			// manual free
-			free(sectionItems[j].second.stuff);
-		}
+		Inventory* inventory;
+		Item* item = FindItemInCharacterInventories(target, itemData, armourFactions, swordManufacturer, swordModel, inventory);
 
 		// stop when the character no longer has instances of the item
 		if (item == nullptr)
@@ -830,32 +782,6 @@ void _doActions_hook(Dialogue* thisptr, DialogLineData* dialogLine)
 			if (giveItemList && giveItemList->size() >= i)
 				item->levelOverride = giveItemList->at(i).values[1];
 			
-			// specific item stuff
-			/*
-			if (dialogLine->givesItem[i].data->type == itemType::WEAPON)
-			{
-				//item->mesh = item->item;
-				//item->item = nullptr;
-				//if(dialogLine->getGameData()->getReferenceListIfExists("sword manufacturer"))
-				//	item->item = ou->theFactory->chooseDataFromListWithVals(dialogLine->getGameData(), "sword manufacturer", itemType::WEAPON_MANUFACTURER, 0)->ptr;
-				//const Ogre::vector<GameDataReference>::type* list = dialogLine->getGameData()->getReferenceListIfExists("sword manufacturer");
-				//if (list)
-				//	item->item = ou->theFactory->chooseDataFromListWithVals(dialogLine->getGameData(), "sword manufacturer", itemType::WEAPON_MANUFACTURER, 0);// list.at(0).ptr;
-				//else
-				// default to unknown manufacturer
-				//if(!item->item)
-				//	item->item = ou->gamedata.getDataByName("Unknown", itemType::WEAPON_MANUFACTURER);
-				//iter = dialogLine->getGameData()->objectReferences.find("sword model");
-				//if (iter != dialogLine->getGameData()->objectReferences.end())
-				//	item->model = iter->second.at(0).ptr;
-			}
-			else if (dialogLine->givesItem[i].data->type == itemType::ARMOUR)
-			{
-				//iter = dialogLine->getGameData()->objectReferences.find("armour faction");
-				//if (iter != dialogLine->getGameData()->objectReferences.end())
-				//	item->faction = ou->factionMgr->getOrCreateFaction(iter->second.at(0).ptr);
-			}
-			*/
 			dialogLine->givesItem[i].data = (GameData*)item;
 		}
 	}
