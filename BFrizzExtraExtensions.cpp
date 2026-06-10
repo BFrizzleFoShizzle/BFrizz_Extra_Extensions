@@ -374,47 +374,6 @@ bool DialogLineData_checkConditions_hook(DialogLineData* thisptr, Dialogue* dial
 			// 0 = no target level
 			int targetLevel = targetItem.values[1];
 			int count = GetItemCount(characterCheck, targetItem.ptr, targetItem.ptr->type, targetLevel, armourFactions, swordManufacturer, swordModel);
-			/*
-			int count = 0;
-			std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems = GetItemsOfTypeFromSections(characterCheck, targetItem.ptr->type);
-			for (int j = 0; j < sectionItems.size(); ++j)
-			{
-				for (int k = 0; k < sectionItems[j].second.size(); ++k)
-				{
-					Item* inventoryItem = sectionItems[j].second[k];
-					// skip incorrect target level
-					if (targetLevel != 0 && std::max(0, targetLevel) != inventoryItem->getLevel())
-						continue;
-
-					if (inventoryItem->data == targetItem.ptr)
-					{
-						DebugLog("Match");
-						if (targetItem.ptr->type == itemType::WEAPON)
-						{
-							// Extra weapon checks
-							if ((swordManufacturer == nullptr || FindInList(inventoryItem->manufacturerData, swordManufacturer))
-								&& (swordModel == nullptr || FindInList(inventoryItem->materialData, swordModel)))
-							{
-								DebugLog("Weapon check passed");
-								count += inventoryItem->quantity;
-							}
-						}
-						else if (targetItem.ptr->type == itemType::ARMOUR)
-						{
-							// Extra armour checks
-							if (armourFactions == nullptr || (inventoryItem->isAFactionUniform() != nullptr && FindInList(inventoryItem->isAFactionUniform()->data, armourFactions)))
-							{
-								count += inventoryItem->quantity;
-							}
-						}
-						else
-						{
-							count += inventoryItem->quantity;
-						}
-					}
-				}
-			}
-			*/
 			// if there aren't enough matching items, fail the check
 			if (count < targetItem.values[0])
 				return false;
