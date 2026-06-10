@@ -153,24 +153,163 @@ static bool checkCondition(Character* characterCheck, Character* characterTarget
 	return true;
 }
 
+std::vector<std::pair<Inventory*, lektor<Item*>>> GetItemsOfTypeFromSections(Character* character, itemType type)
+{
+	std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems;
+	sectionItems.emplace_back(std::make_pair(character->inventory, lektor<Item*>()));
+	for (ogre_unordered_map<std::string, InventorySection*>::type::iterator iter = character->inventory->sections.begin();
+		iter != character->inventory->sections.end(); ++iter)
+	{
+		iter->second->getAllItemsOfType(sectionItems[0].second, type);
+		// also search backpacks in any inventory section
+		lektor<Item*> containers;
+		iter->second->getAllItemsOfType(containers, itemType::CONTAINER);
+		for (int i = 0; i < containers.size(); ++i)
+		{
+			sectionItems.emplace_back(std::make_pair(containers[i]->getInventory(), lektor<Item*>()));
+			containers[i]->getInventory()->getAllItemsOfType(sectionItems.back().second, type, false);
+		}
+		free(containers.stuff);
+	}
+
+	return sectionItems;
+}
+
+const GameDataReference* FindInList(GameData* target, const Ogre::vector<GameDataReference>::type* list)
+{
+	for (int i = 0; i < list->size(); ++i)
+	{
+		if ((*list)[i].ptr == target)
+			return &(*list)[i];
+	}
+	return nullptr;
+}
+
+// searches all sections + backpacks
+Item* FindItemInCharacterInventories(Character* character, GameData* itemData, const Ogre::vector<GameDataReference>::type* armourFactions
+	, const Ogre::vector<GameDataReference>::type* swordManufacturer, const Ogre::vector<GameDataReference>::type* swordModel, Inventory*& inventory)
+{
+	std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems = GetItemsOfTypeFromSections(character, itemData->type);
+
+	Item* item = nullptr;
+	inventory = nullptr;
+	// find matching item
+	for (int j = 0; j < sectionItems.size(); ++j)
+	{
+		if (!item)
+		{
+			inventory = sectionItems[j].first;
+			lektor<Item*>& items = sectionItems[j].second;
+			for (int i = 0; i < items.size(); ++i)
+			{
+				if (items[i]->getGameData() == itemData)
+				{
+					if (itemData->type == itemType::WEAPON)
+					{
+						// Extra weapon checks
+						if ((swordManufacturer == nullptr || FindInList(items[i]->manufacturerData, swordManufacturer))
+							&& (swordModel == nullptr || FindInList(items[i]->materialData, swordModel)))
+						{
+							item = items[i];
+							break;
+						}
+					}
+					else if (itemData->type == itemType::ARMOUR)
+					{
+						// Extra armour checks
+						if (armourFactions == nullptr || (items[i]->isAFactionUniform() != nullptr && FindInList(items[i]->isAFactionUniform()->data, armourFactions)))
+						{
+							item = items[i];
+							break;
+						}
+					}
+					else
+					{
+						// default case
+						item = items[i];
+						break;
+					}
+				}
+			}
+		}
+		// manual free
+		free(sectionItems[j].second.stuff);
+	}
+
+	return item;
+}
+
+DialogLineData* (*DialogLineData_CONSTRUCTOR_orig)(DialogLineData* thisptr, GameData* dat);
+DialogLineData* DialogLineData_CONSTRUCTOR_hook(DialogLineData* thisptr, GameData* dat)
+{
+	DialogLineData_CONSTRUCTOR_orig(thisptr, dat);
+	// clear hasItem, we implement this ourselves
+	thisptr->hasItem.count = 0;
+	return thisptr;
+}
+
+// 0 = no target level
+int GetItemCount(Character* characterCheck, GameData* targetItem, itemType itemType, int targetLevel, const Ogre::vector<GameDataReference>::type* armourFactions
+	, const Ogre::vector<GameDataReference>::type* swordManufacturer, const Ogre::vector<GameDataReference>::type* swordModel)
+{
+	int count = 0;
+	std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems = GetItemsOfTypeFromSections(characterCheck, itemType);
+	for (int j = 0; j < sectionItems.size(); ++j)
+	{
+		for (int k = 0; k < sectionItems[j].second.size(); ++k)
+		{
+			Item* inventoryItem = sectionItems[j].second[k];
+			// skip incorrect target level
+			if (targetLevel != 0 && std::max(0, targetLevel) != inventoryItem->getLevel())
+				continue;
+
+			if (targetItem == nullptr || inventoryItem->data == targetItem)
+			{
+				if (itemType == itemType::WEAPON)
+				{
+					// Extra weapon checks
+					if ((swordManufacturer == nullptr || FindInList(inventoryItem->manufacturerData, swordManufacturer))
+						&& (swordModel == nullptr || FindInList(inventoryItem->materialData, swordModel)))
+					{
+						count += inventoryItem->quantity;
+					}
+				}
+				else if (itemType == itemType::ARMOUR)
+				{
+					// Extra armour checks
+					if (armourFactions == nullptr || (inventoryItem->isAFactionUniform() != nullptr && FindInList(inventoryItem->isAFactionUniform()->data, armourFactions)))
+					{
+						count += inventoryItem->quantity;
+					}
+				}
+				else
+				{
+					count += inventoryItem->quantity;
+				}
+			}
+		}
+	}
+	return count;
+}
+
 bool (*DialogLineData_checkConditions_orig)(DialogLineData* thisptr, Dialogue* dialog, Character* target, bool isWordswap);
 bool DialogLineData_checkConditions_hook(DialogLineData* thisptr, Dialogue* dialog, Character* target, bool isWordswap)
 {
+	// T_ME behaviour - do I have memory tag for target
+	Character* characterCheck = dialog->getCharacter();
+	// I'm sometimes getting NO TARGET?
+	Character* characterTarget = target;
+
+	if (thisptr->speaker != TalkerEnum::T_ME && thisptr->speaker != TalkerEnum::T_WHOLE_SQUAD)
+	{
+		// swap
+		Character* temp = characterTarget;
+		characterTarget = characterCheck;
+		characterCheck = temp;
+	}
+
 	for (DialogLineData::DialogCondition** condition = thisptr->conditions.begin(); condition < thisptr->conditions.end(); ++condition)
 	{
-		// T_ME behaviour - do I have memory tag for target
-		Character* characterCheck = dialog->getCharacter();
-		// I'm sometimes getting NO TARGET?
-		Character* characterTarget = target;
-
-		if ((*condition)->who != TalkerEnum::T_ME && (*condition)->who != TalkerEnum::T_WHOLE_SQUAD)
-		{
-			// swap
-			Character* temp = characterTarget;
-			characterTarget = characterCheck;
-			characterCheck = temp;
-		}
-
 		if (!characterCheck)
 		{
 			ErrorLog("NO SPEAKER");
@@ -184,7 +323,7 @@ bool DialogLineData_checkConditions_hook(DialogLineData* thisptr, Dialogue* dial
 			//break;
 		}
 
-		if ((*condition)->who == TalkerEnum::T_WHOLE_SQUAD)
+		if (thisptr->speaker == TalkerEnum::T_WHOLE_SQUAD)
 		{
 			// with above branch, characterCheck will be "me"
 			ActivePlatoon* activePlatoon = characterCheck->getPlatoon();
@@ -219,6 +358,83 @@ bool DialogLineData_checkConditions_hook(DialogLineData* thisptr, Dialogue* dial
 				return false;
 		}
 	}
+
+	// find restrictions
+	const Ogre::vector<GameDataReference>::type* armourFactions = thisptr->getGameData()->getReferenceListIfExists("armour faction");
+	const Ogre::vector<GameDataReference>::type* swordManufacturer = thisptr->getGameData()->getReferenceListIfExists("sword manufacturer");
+	const Ogre::vector<GameDataReference>::type* swordModel = thisptr->getGameData()->getReferenceListIfExists("sword model");
+	const Ogre::vector<GameDataReference>::type* targetHasItemList = thisptr->getGameData()->getReferenceListIfExists("target has item");
+	
+	// check weapon/armour item conditions
+	if (targetHasItemList)
+	{
+		for (int i = 0; i < targetHasItemList->size(); ++i)
+		{
+			const GameDataReference& targetItem = targetHasItemList->at(i);
+			// 0 = no target level
+			int targetLevel = targetItem.values[1];
+			int count = GetItemCount(characterCheck, targetItem.ptr, targetItem.ptr->type, targetLevel, armourFactions, swordManufacturer, swordModel);
+			/*
+			int count = 0;
+			std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems = GetItemsOfTypeFromSections(characterCheck, targetItem.ptr->type);
+			for (int j = 0; j < sectionItems.size(); ++j)
+			{
+				for (int k = 0; k < sectionItems[j].second.size(); ++k)
+				{
+					Item* inventoryItem = sectionItems[j].second[k];
+					// skip incorrect target level
+					if (targetLevel != 0 && std::max(0, targetLevel) != inventoryItem->getLevel())
+						continue;
+
+					if (inventoryItem->data == targetItem.ptr)
+					{
+						DebugLog("Match");
+						if (targetItem.ptr->type == itemType::WEAPON)
+						{
+							// Extra weapon checks
+							if ((swordManufacturer == nullptr || FindInList(inventoryItem->manufacturerData, swordManufacturer))
+								&& (swordModel == nullptr || FindInList(inventoryItem->materialData, swordModel)))
+							{
+								DebugLog("Weapon check passed");
+								count += inventoryItem->quantity;
+							}
+						}
+						else if (targetItem.ptr->type == itemType::ARMOUR)
+						{
+							// Extra armour checks
+							if (armourFactions == nullptr || (inventoryItem->isAFactionUniform() != nullptr && FindInList(inventoryItem->isAFactionUniform()->data, armourFactions)))
+							{
+								count += inventoryItem->quantity;
+							}
+						}
+						else
+						{
+							count += inventoryItem->quantity;
+						}
+					}
+				}
+			}
+			*/
+			// if there aren't enough matching items, fail the check
+			if (count < targetItem.values[0])
+				return false;
+		}
+	}
+
+	const Ogre::vector<GameDataReference>::type* targetHasItemTypeList = thisptr->getGameData()->getReferenceListIfExists("target has item type");
+	if (targetHasItemTypeList)
+	{
+		for (int i = 0; i < targetHasItemTypeList->size(); ++i)
+		{
+			const GameDataReference& targetItem = targetHasItemTypeList->at(i);
+			// 0 = no target level
+			int targetLevel = targetItem.values[1];
+			int count = GetItemCount(characterCheck, nullptr, targetItem.ptr->type, targetLevel, armourFactions, swordManufacturer, swordModel);
+			if (count < targetItem.values[0])
+				return false;
+		}
+	}
+
 	return DialogLineData_checkConditions_orig(thisptr, dialog, target, isWordswap);
 }
 
@@ -357,92 +573,6 @@ bool checkTags_hook(DialogLineData* thisptr, Character* me, Character* target)
 
 	// VANILLA TAGS
 	return checkTags_orig(thisptr, me, target);
-}
-
-const GameDataReference* FindInList(GameData* target, const Ogre::vector<GameDataReference>::type* list)
-{
-	for (int i = 0; i < list->size(); ++i)
-	{
-		if ((*list)[i].ptr == target)
-			return &(*list)[i];
-	}
-	return nullptr;
-}
-
-std::vector<std::pair<Inventory*, lektor<Item*>>> GetItemsOfTypeFromSections(Character* character, itemType type)
-{
-	std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems;
-	sectionItems.emplace_back(std::make_pair(character->inventory, lektor<Item*>()));
-	for (ogre_unordered_map<std::string, InventorySection*>::type::iterator iter = character->inventory->sections.begin();
-		iter != character->inventory->sections.end(); ++iter)
-	{
-		iter->second->getAllItemsOfType(sectionItems[0].second, type);
-		// also search backpacks in any inventory section
-		lektor<Item*> containers;
-		iter->second->getAllItemsOfType(containers, itemType::CONTAINER);
-		for (int i = 0; i < containers.size(); ++i)
-		{
-			sectionItems.emplace_back(std::make_pair(containers[i]->getInventory(), lektor<Item*>()));
-			containers[i]->getInventory()->getAllItemsOfType(sectionItems.back().second, type, false);
-		}
-		free(containers.stuff);
-	}
-
-	return sectionItems;
-}
-
-// searches all sections + backpacks
-Item* FindItemInCharacterInventories(Character* character, GameData* itemData, const Ogre::vector<GameDataReference>::type* armourFactions
-	, const Ogre::vector<GameDataReference>::type* swordManufacturer, const Ogre::vector<GameDataReference>::type* swordModel, Inventory* &inventory)
-{
-	std::vector<std::pair<Inventory*, lektor<Item*>>> sectionItems = GetItemsOfTypeFromSections(character, itemData->type);
-
-	Item* item = nullptr;
-	inventory = nullptr;
-	// find matching item
-	for (int j = 0; j < sectionItems.size(); ++j)
-	{
-		if (!item)
-		{
-			inventory = sectionItems[j].first;
-			lektor<Item*>& items = sectionItems[j].second;
-			for (int i = 0; i < items.size(); ++i)
-			{
-				if (items[i]->getGameData() == itemData)
-				{
-					if (itemData->type == itemType::WEAPON)
-					{
-						// Extra weapon checks
-						if ((swordManufacturer == nullptr || FindInList(items[i]->manufacturerData, swordManufacturer))
-							&& (swordModel == nullptr || FindInList(items[i]->materialData, swordModel)))
-						{
-							item = items[i];
-							break;
-						}
-					}
-					else if (itemData->type == itemType::ARMOUR)
-					{
-						// Extra armour checks
-						if (armourFactions == nullptr || (items[i]->isAFactionUniform() != nullptr && FindInList(items[i]->isAFactionUniform()->data, armourFactions)))
-						{
-							item = items[i];
-							break;
-						}
-					}
-					else
-					{
-						// default case
-						item = items[i];
-						break;
-					}
-				}
-			}
-		}
-		// manual free
-		free(sectionItems[j].second.stuff);
-	}
-
-	return item;
 }
 
 // returns num items taken
@@ -922,6 +1052,8 @@ __declspec(dllexport) void startPlugin()
 	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress(&Dialogue::sayLine), &Dialogue_sayLine_hook, &Dialogue_sayLine_orig))
 		ErrorLog("Dialogue Extensions: could not install hook!");
 	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress((Item*(RootObjectFactory::*)(GameData*, const hand&, GameData*, GameData*, int, Faction*)) & RootObjectFactory::createItem), &RootObjectFactory_createItem_hook, &RootObjectFactory_createItem_orig))
+		ErrorLog("Dialogue Extensions: could not install hook!");
+	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress(&DialogLineData::_CONSTRUCTOR), &DialogLineData_CONSTRUCTOR_hook, &DialogLineData_CONSTRUCTOR_orig))
 		ErrorLog("Dialogue Extensions: could not install hook!");
 	// workaround for player conversations
 	if (KenshiLib::SUCCESS != KenshiLib::AddHook(KenshiLib::GetRealAddress((void(DialogLineData::*)(std::string &, bool)) & DialogLineData::getText), &DialogLineData_getText_hook, &DialogLineData_getText_orig))
