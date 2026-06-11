@@ -359,41 +359,65 @@ bool DialogLineData_checkConditions_hook(DialogLineData* thisptr, Dialogue* dial
 		}
 	}
 
-	// find restrictions
-	const Ogre::vector<GameDataReference>::type* armourFactions = thisptr->getGameData()->getReferenceListIfExists("armour faction");
-	const Ogre::vector<GameDataReference>::type* swordManufacturer = thisptr->getGameData()->getReferenceListIfExists("sword manufacturer");
-	const Ogre::vector<GameDataReference>::type* swordModel = thisptr->getGameData()->getReferenceListIfExists("sword model");
 	const Ogre::vector<GameDataReference>::type* targetHasItemList = thisptr->getGameData()->getReferenceListIfExists("target has item");
-	
-	// check weapon/armour item conditions
-	if (targetHasItemList)
-	{
-		for (int i = 0; i < targetHasItemList->size(); ++i)
-		{
-			const GameDataReference& targetItem = targetHasItemList->at(i);
-			// 0 = no target level
-			int targetLevel = targetItem.values[1];
-			int count = GetItemCount(characterCheck, targetItem.ptr, targetItem.ptr->type, targetLevel, armourFactions, swordManufacturer, swordModel);
-			// if there aren't enough matching items, fail the check
-			if (count < targetItem.values[0])
-				return false;
-		}
-	}
-
 	const Ogre::vector<GameDataReference>::type* targetHasItemTypeList = thisptr->getGameData()->getReferenceListIfExists("target has item type");
-	if (targetHasItemTypeList)
-	{
-		for (int i = 0; i < targetHasItemTypeList->size(); ++i)
-		{
-			const GameDataReference& targetItem = targetHasItemTypeList->at(i);
-			// 0 = no target level
-			int targetLevel = targetItem.values[1];
-			int count = GetItemCount(characterCheck, nullptr, targetItem.ptr->type, targetLevel, armourFactions, swordManufacturer, swordModel);
-			if (count < targetItem.values[0])
-				return false;
-		}
-	}
 
+	// check weapon/armour item conditions
+	if (targetHasItemList || targetHasItemTypeList)
+	{
+		// find restrictions
+		const Ogre::vector<GameDataReference>::type* armourFactions = thisptr->getGameData()->getReferenceListIfExists("armour faction");
+		const Ogre::vector<GameDataReference>::type* swordManufacturer = thisptr->getGameData()->getReferenceListIfExists("sword manufacturer");
+		const Ogre::vector<GameDataReference>::type* swordModel = thisptr->getGameData()->getReferenceListIfExists("sword model");
+
+		ActivePlatoon* activePlatoon = characterCheck->getPlatoon();
+		lektor<RootObject*> characters;
+		activePlatoon->getCharactersInArea(characters, characterCheck->getPosition(), SQUAD_CHECK_RADIUS, false);
+
+		if (targetHasItemList)
+		{
+			for (int i = 0; i < targetHasItemList->size(); ++i)
+			{
+				int count = 0;
+				const GameDataReference& targetItem = targetHasItemList->at(i);
+				// 0 = no target level
+				int targetLevel = targetItem.values[1];
+				for (int c = 0; c < characters.count; ++c)
+				{
+					Character* squadChar = dynamic_cast<Character*>(characters[c]);
+					if(squadChar)
+						count += GetItemCount(squadChar, targetItem.ptr, targetItem.ptr->type, targetLevel, armourFactions, swordManufacturer, swordModel);
+				}
+				// if there aren't enough matching items, fail the check
+				if (count < targetItem.values[0])
+					return false;
+			}
+		}
+
+		if (targetHasItemTypeList)
+		{
+			for (int i = 0; i < targetHasItemTypeList->size(); ++i)
+			{
+				int count = 0;
+				const GameDataReference& targetItem = targetHasItemTypeList->at(i);
+				// 0 = no target level
+				int targetLevel = targetItem.values[1];
+				for (int c = 0; c < characters.count; ++c)
+				{
+					Character* squadChar = dynamic_cast<Character*>(characters[c]);
+					if(squadChar)
+						count += GetItemCount(squadChar, nullptr, targetItem.ptr->type, targetLevel, armourFactions, swordManufacturer, swordModel);
+				}
+				// if there aren't enough matching items, fail the check
+				if (count < targetItem.values[0])
+					return false;
+			}
+		}
+
+		// cleanup
+		if (characters.stuff)
+			free(characters.stuff);
+	}
 	return DialogLineData_checkConditions_orig(thisptr, dialog, target, isWordswap);
 }
 
